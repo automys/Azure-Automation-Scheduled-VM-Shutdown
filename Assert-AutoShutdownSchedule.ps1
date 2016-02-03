@@ -1,5 +1,7 @@
-﻿[String] $AzureCredentialName = "Use *Default Automation Credential* Asset"
-[String] $AzureSubscriptionName = "Use *Default Azure Subscription* Variable Value"
+﻿param(
+	[String] $AzureCredentialName = "Use *Default Automation Credential* Asset",
+	[String] $AzureSubscriptionName = "Use *Default Azure Subscription* Variable Value"
+)
 
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
