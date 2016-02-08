@@ -1,7 +1,61 @@
-﻿param(
+﻿<#
+    .SYNOPSIS
+        This Azure Automation runbook automates the scheduled shutdown and startup of virtual machines in an Azure subscription. 
+
+    .DESCRIPTION
+        The runbook implements a solution for scheduled power management of Azure virtual machines in combination with tags
+        on virtual machines or resource groups which define a shutdown schedule. Each time it runs, the runbook looks for all
+        virtual machines or resource groups with a tag named "AutoShutdownSchedule" having a value defining the schedule, 
+        e.g. "10PM -> 6AM". It then checks the current time against each schedule entry, ensuring that VMs with tags or in tagged groups 
+        are shut down or started to conform to the defined schedule.
+
+        This is a PowerShell runbook, as opposed to a PowerShell Workflow runbook.
+
+        This runbook requires the "Azure" and "AzureRM.Resources" modules which are present by default in Azure Automation accounts.
+        For detailed documentation and instructions, see: 
+        
+        https://automys.com/library/asset/scheduled-virtual-machine-shutdown-startup-microsoft-azure
+
+    .PARAMETER AzureCredentialName
+        The name of the PowerShell credential asset in the Automation account that contains username and password
+        for the account used to connect to target Azure subscription. This user must be configured as co-administrator and owner
+        of the subscription for best functionality. 
+
+        By default, the runbook will use the credential with name "Default Automation Credential"
+
+        For for details on credential configuration, see:
+        http://azure.microsoft.com/blog/2014/08/27/azure-automation-authenticating-to-azure-using-azure-active-directory/
+    
+    .PARAMETER AzureSubscriptionName
+        The name or ID of Azure subscription in which the resources will be created. By default, the runbook will use 
+        the value defined in the Variable setting named "Default Azure Subscription"
+    
+    .PARAMETER Simulate
+        If $true, the runbook will not perform any power actions and will only simulate evaluating the tagged schedules. Use this
+        to test your runbook to see what it will do when run normally (Simulate = $false).
+
+    .EXAMPLE
+        For testing examples, see the documentation at:
+
+        https://automys.com/library/asset/scheduled-virtual-machine-shutdown-startup-microsoft-azure
+    
+    .INPUTS
+        None.
+
+    .OUTPUTS
+        Human-readable informational and error messages produced during the job. Not intended to be consumed by another runbook.
+#>
+
+param(
+    [parameter(Mandatory=$false)]
 	[String] $AzureCredentialName = "Use *Default Automation Credential* Asset",
-	[String] $AzureSubscriptionName = "Use *Default Azure Subscription* Variable Value"
+    [parameter(Mandatory=$false)]
+	[String] $AzureSubscriptionName = "Use *Default Azure Subscription* Variable Value",
+    [parameter(Mandatory=$false)]
+    [bool]$Simulate = $false
 )
+
+$VERSION = "2.0"
 
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
@@ -96,19 +150,20 @@ function AssertVirtualMachinePowerState
         [Object]$VirtualMachine,
         [string]$DesiredState,
         [Object[]]$ResourceManagerVMList,
-        [Object[]]$ClassicVMList
+        [Object[]]$ClassicVMList,
+        [bool]$Simulate
     )
 
     # Get VM depending on type
     if($VirtualMachine.ResourceType -eq "Microsoft.ClassicCompute/virtualMachines")
     {
         $classicVM = $ClassicVMList | where Name -eq $VirtualMachine.Name
-        AssertClassicVirtualMachinePowerState -VirtualMachine $classicVM -DesiredState $DesiredState
+        AssertClassicVirtualMachinePowerState -VirtualMachine $classicVM -DesiredState $DesiredState -Simulate $Simulate
     }
     elseif($VirtualMachine.ResourceType -eq "Microsoft.Compute/virtualMachines")
     {
         $resourceManagerVM = $ResourceManagerVMList | where Name -eq $VirtualMachine.Name
-        AssertResourceManagerVirtualMachinePowerState -VirtualMachine $resourceManagerVM -DesiredState $DesiredState
+        AssertResourceManagerVirtualMachinePowerState -VirtualMachine $resourceManagerVM -DesiredState $DesiredState -Simulate $Simulate
     }
     else
     {
@@ -121,21 +176,36 @@ function AssertClassicVirtualMachinePowerState
 {
     param(
         [Object]$VirtualMachine,
-        [string]$DesiredState
+        [string]$DesiredState,
+        [bool]$Simulate
     )
 
     # If should be started and isn't, start VM
 	if($DesiredState -eq "Started" -and $VirtualMachine.PowerState -notmatch "Started|Starting")
 	{
-		Write-Output "[$($VirtualMachine.Name)]: Starting VM"
-		$VirtualMachine | Start-AzureVM
+		if($Simulate)
+        {
+            Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have started VM. (No action taken)"
+        }
+        else
+        {
+            Write-Output "[$($VirtualMachine.Name)]: Starting VM"
+            $VirtualMachine | Start-AzureVM
+        }
 	}
 		
 	# If should be stopped and isn't, stop VM
 	elseif($DesiredState -eq "StoppedDeallocated" -and $VirtualMachine.PowerState -ne "Stopped")
 	{
-		Write-Output "[$($VirtualMachine.Name)]: Stopping VM"
-		$VirtualMachine | Stop-AzureVM -Force
+        if($Simulate)
+        {
+            Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have stopped VM. (No action taken)"
+        }
+        else
+        {
+            Write-Output "[$($VirtualMachine.Name)]: Stopping VM"
+            $VirtualMachine | Stop-AzureVM -Force
+        }
 	}
 
     # Otherwise, current power state is correct
@@ -150,7 +220,8 @@ function AssertResourceManagerVirtualMachinePowerState
 {
     param(
         [Object]$VirtualMachine,
-        [string]$DesiredState
+        [string]$DesiredState,
+        [bool]$Simulate
     )
 
     # Get VM with current status
@@ -161,15 +232,29 @@ function AssertResourceManagerVirtualMachinePowerState
     # If should be started and isn't, start VM
 	if($DesiredState -eq "Started" -and $currentStatus -notmatch "running")
 	{
-		Write-Output "[$($VirtualMachine.Name)]: Starting VM"
-		$resourceManagerVM | Start-AzureRmVM
+        if($Simulate)
+        {
+            Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have started VM. (No action taken)"
+        }
+        else
+        {
+            Write-Output "[$($VirtualMachine.Name)]: Starting VM"
+            $resourceManagerVM | Start-AzureRmVM
+        }
 	}
 		
 	# If should be stopped and isn't, stop VM
 	elseif($DesiredState -eq "StoppedDeallocated" -and $currentStatus -ne "deallocated")
 	{
-		Write-Output "[$($VirtualMachine.Name)]: Stopping VM"
-		$resourceManagerVM | Stop-AzureRmVM -Force
+        if($Simulate)
+        {
+            Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have stopped VM. (No action taken)"
+        }
+        else
+        {
+            Write-Output "[$($VirtualMachine.Name)]: Stopping VM"
+            $resourceManagerVM | Stop-AzureRmVM -Force
+        }
 	}
 
     # Otherwise, current power state is correct
@@ -185,7 +270,15 @@ $VerbosePreference = "Continue"
 try
 {
     $currentTime = (Get-Date).ToUniversalTime()
-    Write-Output "Runbook started"
+    Write-Output "Runbook started. Version: $VERSION"
+    if($Simulate)
+    {
+        Write-Output "*** Running in SIMULATE mode. No power actions will be taken. ***"
+    }
+    else
+    {
+        Write-Output "*** Running in LIVE mode. Schedules will be enforced. ***"
+    }
     Write-Output "Current UTC/GMT time [$($currentTime.ToString("dddd, yyyy MMM dd HH:mm:ss"))] will be checked against schedules"
 	
     # Retrieve credential
@@ -213,7 +306,11 @@ try
     $account = Add-AzureAccount -Credential $azureCredential
 	
     # Check for returned userID, indicating successful authentication
-    if(-not (Get-AzureAccount -Name $azureCredential.UserName))
+    if(Get-AzureAccount -Name $azureCredential.UserName)
+    {
+        Write-Output "Successfully authenticated as user: $($azureCredential.UserName)"
+    }
+    else
     {
         throw "Authentication failed. Ensure a valid Azure Active Directory user account is specified which is configured as a co-administrator on the target subscription. Verify you can log into the Azure portal using these credentials."
     }
@@ -281,7 +378,7 @@ try
         {
             # VM has direct tag (possible for resource manager deployment model VMs). Prefer this tag schedule.
             $schedule = ($vm.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
-            Write-Output "[$($vm.Name)]: Found direct schedule tag with value: $schedule"
+            Write-Output "[$($vm.Name)]: Found direct VM schedule tag with value: $schedule"
         }
         elseif($taggedResourceGroupNames -contains $vm.ResourceGroupName)
         {
@@ -325,13 +422,13 @@ try
 		{
             # Schedule is matched. Shut down the VM if it is running. 
 		    Write-Output "[$($vm.Name)]: Current time [$currentTime] falls within the scheduled shutdown range [$matchedSchedule]"
-		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "StoppedDeallocated" -ResourceManagerVMList $resourceManagerVMList -ClassicVMList $classicVMList
+		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "StoppedDeallocated" -ResourceManagerVMList $resourceManagerVMList -ClassicVMList $classicVMList -Simulate $Simulate
 		}
 		else
 		{
             # Schedule not matched. Start VM if stopped.
 		    Write-Output "[$($vm.Name)]: Current time falls outside of all scheduled shutdown ranges."
-		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "Started" -ResourceManagerVMList $resourceManagerVMList -ClassicVMList $classicVMList
+		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "Started" -ResourceManagerVMList $resourceManagerVMList -ClassicVMList $classicVMList -Simulate $Simulate
 		}	    
     }
 
@@ -344,5 +441,5 @@ catch
 }
 finally
 {
-    Write-Output "Runbook finished"
+    Write-Output "Runbook finished (Duration: $(("{0:hh\:mm\:ss}" -f ((Get-Date).ToUniversalTime() - $currentTime))))"
 }
