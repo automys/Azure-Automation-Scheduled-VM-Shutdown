@@ -264,9 +264,7 @@ function AssertResourceManagerVirtualMachinePowerState
     }
 }
 
-# For testing
-$VerbosePreference = "Continue"
-
+# Main runbook content
 try
 {
     $currentTime = (Get-Date).ToUniversalTime()
@@ -312,7 +310,7 @@ try
     }
     else
     {
-        throw "Authentication failed. Ensure a valid Azure Active Directory user account is specified which is configured as a co-administrator on the target subscription. Verify you can log into the Azure portal using these credentials."
+        throw "Authentication failed for credential [$($azureCredential.UserName)]. Ensure a valid Azure Active Directory user account is specified which is configured as a co-administrator (using classic portal) and subscription owner (modern portal) on the target subscription. Verify you can log into the Azure portal using these credentials."
     }
 
     # Retrieve subscription name from variable asset if not specified
