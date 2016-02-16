@@ -55,7 +55,7 @@ param(
     [bool]$Simulate = $false
 )
 
-$VERSION = "2.0"
+$VERSION = "2.0.1"
 
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
@@ -279,15 +279,33 @@ try
     }
     Write-Output "Current UTC/GMT time [$($currentTime.ToString("dddd, yyyy MMM dd HH:mm:ss"))] will be checked against schedules"
 	
+    # Retrieve subscription name from variable asset if not specified
+    if($AzureSubscriptionName -eq "Use *Default Azure Subscription* Variable Value")
+    {
+        $AzureSubscriptionName = Get-AutomationVariable -Name "Default Azure Subscription"
+        if($AzureSubscriptionName.length -gt 0)
+        {
+            Write-Output "Specified subscription name/ID: [$AzureSubscriptionName]"
+        }
+        else
+        {
+            throw "No subscription name was specified, and no variable asset with name 'Default Azure Subscription' was found. Either specify an Azure subscription name or define the default using a variable setting"
+        }
+    }
+
     # Retrieve credential
     write-output "Specified credential asset name: [$AzureCredentialName]"
     if($AzureCredentialName -eq "Use *Default Automation Credential* asset")
     {
         # By default, look for "Default Automation Credential" asset
         $azureCredential = Get-AutomationPSCredential -Name "Default Automation Credential"
-        if($azureCredential -eq $null)
+        if($azureCredential -ne $null)
         {
-		    throw "No automation credential name was specified, and no credential asset with name 'Default Automation Credential' was found. Either specify a stored credential name or define the default using a credential asset"
+		    Write-Output "Attempting to authenticate as: [$($azureCredential.UserName)]"
+        }
+        else
+        {
+            throw "No automation credential name was specified, and no credential asset with name 'Default Automation Credential' was found. Either specify a stored credential name or define the default using a credential asset"
         }
     }
     else
@@ -306,25 +324,11 @@ try
     # Check for returned userID, indicating successful authentication
     if(Get-AzureAccount -Name $azureCredential.UserName)
     {
-        Write-Output "Successfully authenticated as user: $($azureCredential.UserName)"
+        Write-Output "Successfully authenticated as user: [$($azureCredential.UserName)]"
     }
     else
     {
         throw "Authentication failed for credential [$($azureCredential.UserName)]. Ensure a valid Azure Active Directory user account is specified which is configured as a co-administrator (using classic portal) and subscription owner (modern portal) on the target subscription. Verify you can log into the Azure portal using these credentials."
-    }
-
-    # Retrieve subscription name from variable asset if not specified
-    if($AzureSubscriptionName -eq "Use *Default Azure Subscription* Variable Value")
-    {
-        $AzureSubscriptionName = Get-AutomationVariable -Name "Default Azure Subscription"
-        if($AzureSubscriptionName.length -gt 0)
-        {
-            Write-Output "Specified subscription name/ID: $AzureSubscriptionName"
-        }
-        else
-        {
-            throw "No subscription name was specified, and no variable asset with name 'Default Azure Subscription' was found. Either specify an Azure subscription name or define the default using a variable setting"
-        }
     }
 
     # Validate subscription
