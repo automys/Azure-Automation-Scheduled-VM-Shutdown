@@ -7,7 +7,9 @@
         on virtual machines or resource groups which define a shutdown schedule. Each time it runs, the runbook looks for all
         virtual machines or resource groups with a tag named "AutoShutdownSchedule" having a value defining the schedule, 
         e.g. "10PM -> 6AM". It then checks the current time against each schedule entry, ensuring that VMs with tags or in tagged groups 
-        are shut down or started to conform to the defined schedule.
+        are shut down or started to conform to the defined schedule. By default, the times must match the scripting engine's location, presumed to be UTC.
+		If you wish to specify time zone, and also correct for daylight savings variation, add tag "AutoShutdownTimeZone" with a string from the
+		System.TimeZoneInfo.GetSystemTimeZones() collection's Id property (Powershell cmd: [System.TimeZoneInfo]::GetSystemTimeZones() | foreach{$_.Id} | sort $_.Id)
 
         This is a PowerShell runbook, as opposed to a PowerShell Workflow runbook.
 
@@ -55,14 +57,21 @@ param(
     [bool]$Simulate = $false
 )
 
-$VERSION = "2.0.1"
+$VERSION = "2.0.2"
+
+# Optional: remove these 2 assignments from parameters and instead set them in global variables
+# $AzureSubscriptionName = Get-AutomationVariable -Name "SubscriptionName" 
+# $AzureCredentialName = Get-AutomationVariable -Name "AutomationAdminAccount" 
+
 
 # Define function to check current time against specified range
-function CheckScheduleEntry ([string]$TimeRange)
+function CheckScheduleEntry ([string]$TimeRange, [string]$TimeZone)
 {	
 	# Initialize variables
 	$rangeStart, $rangeEnd, $parsedDay = $null
-	$currentTime = (Get-Date).ToUniversalTime()
+    $currentTime = Get-Date
+    $TZ = [System.TimeZoneInfo]::FindSystemTimeZoneById($TimeZone)
+    $currentTime = [System.TimeZoneInfo]::ConvertTime($currentTime, [System.TimeZoneInfo]::Local, $TZ) 
     $midnight = $currentTime.AddDays(1).Date	        
 
 	try
@@ -374,6 +383,7 @@ try
     foreach($vm in $resourceManagerVMList)
     {
         $schedule = $null
+        $scheduleTZ = [System.TimeZoneInfo]::Local.Id
 
         # Check for direct tag or group-inherited tag
         if($vm.ResourceType -eq "Microsoft.Compute/virtualMachines" -and $vm.Tags -and $vm.Tags.Name -contains "AutoShutdownSchedule")
@@ -381,6 +391,16 @@ try
             # VM has direct tag (possible for resource manager deployment model VMs). Prefer this tag schedule.
             $schedule = ($vm.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
             Write-Output "[$($vm.Name)]: Found direct VM schedule tag with value: $schedule"
+
+			if($vm.Tags.Name -contains "AutoShutdownTimeZone")
+			{
+				$scheduleTZ = ($vm.Tags | where Name -eq "AutoShutdownTimeZone")["Value"]
+				Write-Output "TimeZone is specified as $scheduleTZ"
+			}
+			else
+			{
+				Write-Output "TimeZone is not specified. Using $scheduleTZ"
+			}
         }
         elseif($taggedResourceGroupNames -contains $vm.ResourceGroupName)
         {
@@ -388,6 +408,16 @@ try
             $parentGroup = $taggedResourceGroups | where ResourceGroupName -eq $vm.ResourceGroupName
             $schedule = ($parentGroup.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
             Write-Output "[$($vm.Name)]: Found parent resource group schedule tag with value: $schedule"
+
+			if($parentGroup.Tags.Name -contains "AutoShutdownTimeZone")
+			{
+				$scheduleTZ = ($parentGroup.Tags | where Name -eq "AutoShutdownTimeZone")["Value"]
+				Write-Output "TimeZone is specified for resource group as $scheduleTZ"
+			}
+			else
+			{
+				Write-Output "TimeZone for resource group is not specified. Using $scheduleTZ"
+			}
         }
         else
         {
@@ -411,7 +441,7 @@ try
         $matchedSchedule = $null
 		foreach($entry in $timeRangeList)
 		{
-		    if((CheckScheduleEntry -TimeRange $entry) -eq $true)
+		    if((CheckScheduleEntry -TimeRange $entry -TimeZone $scheduleTZ) -eq $true)
 		    {
 		        $scheduleMatched = $true
                 $matchedSchedule = $entry
