@@ -349,11 +349,11 @@ try
     {
         if($subscription.Count -eq 0)
         {
-            throw "No accessible subscription found with name or ID [$Using:AzureSubscriptionName]. Check the runbook parameters and ensure user is a co-administrator on the target subscription."
+            throw "No accessible subscription found with name or ID [$AzureSubscriptionName]. Check the runbook parameters and ensure user is a co-administrator on the target subscription."
         }
         elseif($subscriptions.Count -gt 1)
         {
-            throw "More than one accessible subscription found with name or ID [$Using:AzureSubscriptionName]. Please ensure your subscription names are unique, or specify the ID instead"
+            throw "More than one accessible subscription found with name or ID [$AzureSubscriptionName]. Please ensure your subscription names are unique, or specify the ID instead"
         }
     }
 
