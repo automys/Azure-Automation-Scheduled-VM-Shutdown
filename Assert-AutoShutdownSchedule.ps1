@@ -55,7 +55,7 @@ param(
     [bool]$Simulate = $false
 )
 
-$VERSION = "2.0.1"
+$VERSION = "2.0.2"
 
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
