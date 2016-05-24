@@ -1,4 +1,4 @@
-﻿<#
+<#
     .SYNOPSIS
         This Azure Automation runbook automates the scheduled shutdown and startup of virtual machines in an Azure subscription. 
 
@@ -15,21 +15,9 @@
         For detailed documentation and instructions, see: 
         
         https://automys.com/library/asset/scheduled-virtual-machine-shutdown-startup-microsoft-azure
-
-    .PARAMETER AzureCredentialName
-        The name of the PowerShell credential asset in the Automation account that contains username and password
-        for the account used to connect to target Azure subscription. This user must be configured as co-administrator and owner
-        of the subscription for best functionality. 
-
-        By default, the runbook will use the credential with name "Default Automation Credential"
-
-        For for details on credential configuration, see:
-        http://azure.microsoft.com/blog/2014/08/27/azure-automation-authenticating-to-azure-using-azure-active-directory/
-    
-    .PARAMETER AzureSubscriptionName
-        The name or ID of Azure subscription in which the resources will be created. By default, the runbook will use 
-        the value defined in the Variable setting named "Default Azure Subscription"
-    
+        
+        This workbook relies on the Service Principal mechanism introduced in Q2 2016, and therefore does not require the user to specify a subscription or credentials.
+ 
     .PARAMETER Simulate
         If $true, the runbook will not perform any power actions and will only simulate evaluating the tagged schedules. Use this
         to test your runbook to see what it will do when run normally (Simulate = $false).
@@ -47,10 +35,6 @@
 #>
 
 param(
-    [parameter(Mandatory=$false)]
-	[String] $AzureCredentialName = "Use *Default Automation Credential* Asset",
-    [parameter(Mandatory=$false)]
-	[String] $AzureSubscriptionName = "Use *Default Azure Subscription* Variable Value",
     [parameter(Mandatory=$false)]
     [bool]$Simulate = $false
 )
@@ -269,93 +253,39 @@ try
 {
     $currentTime = (Get-Date).ToUniversalTime()
     Write-Output "Runbook started. Version: $VERSION"
-    if($Simulate)
-    {
+    if($Simulate) {
         Write-Output "*** Running in SIMULATE mode. No power actions will be taken. ***"
     }
-    else
-    {
+    else {
         Write-Output "*** Running in LIVE mode. Schedules will be enforced. ***"
     }
     Write-Output "Current UTC/GMT time [$($currentTime.ToString("dddd, yyyy MMM dd HH:mm:ss"))] will be checked against schedules"
 	
-    # Retrieve subscription name from variable asset if not specified
-    if($AzureSubscriptionName -eq "Use *Default Azure Subscription* Variable Value")
+    # Connect via Azure Resource Manager        
+    $connectionName = "AzureRunAsConnection"
+    try
     {
-        $AzureSubscriptionName = Get-AutomationVariable -Name "Default Azure Subscription"
-        if($AzureSubscriptionName.length -gt 0)
-        {
-            Write-Output "Specified subscription name/ID: [$AzureSubscriptionName]"
-        }
-        else
-        {
-            throw "No subscription name was specified, and no variable asset with name 'Default Azure Subscription' was found. Either specify an Azure subscription name or define the default using a variable setting"
-        }
-    }
+        # Get the connection "AzureRunAsConnection "
+        $servicePrincipalConnection=Get-AutomationConnection -Name $connectionName         
 
-    # Retrieve credential
-    write-output "Specified credential asset name: [$AzureCredentialName]"
-    if($AzureCredentialName -eq "Use *Default Automation Credential* asset")
-    {
-        # By default, look for "Default Automation Credential" asset
-        $azureCredential = Get-AutomationPSCredential -Name "Default Automation Credential"
-        if($azureCredential -ne $null)
-        {
-		    Write-Output "Attempting to authenticate as: [$($azureCredential.UserName)]"
-        }
-        else
-        {
-            throw "No automation credential name was specified, and no credential asset with name 'Default Automation Credential' was found. Either specify a stored credential name or define the default using a credential asset"
-        }
+        "Logging in to Azure..."
+        $resourceManagerContext = Add-AzureRmAccount `
+            -ServicePrincipal `
+            -TenantId $servicePrincipalConnection.TenantId `
+            -ApplicationId $servicePrincipalConnection.ApplicationId `
+            -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint
     }
-    else
-    {
-        # A different credential name was specified, attempt to load it
-        $azureCredential = Get-AutomationPSCredential -Name $AzureCredentialName
-        if($azureCredential -eq $null)
+    catch {
+        if (!$servicePrincipalConnection)
         {
-            throw "Failed to get credential with name [$AzureCredentialName]"
+            $ErrorMessage = "Connection $connectionName not found."
+            throw $ErrorMessage
+        } else{
+            Write-Error -Message $_.Exception
+            throw $_.Exception
         }
     }
-
-    # Connect to Azure using credential asset (classic API)
-    $account = Add-AzureAccount -Credential $azureCredential
-	
-    # Check for returned userID, indicating successful authentication
-    if(Get-AzureAccount -Name $azureCredential.UserName)
-    {
-        Write-Output "Successfully authenticated as user: [$($azureCredential.UserName)]"
-    }
-    else
-    {
-        throw "Authentication failed for credential [$($azureCredential.UserName)]. Ensure a valid Azure Active Directory user account is specified which is configured as a co-administrator (using classic portal) and subscription owner (modern portal) on the target subscription. Verify you can log into the Azure portal using these credentials."
-    }
-
-    # Validate subscription
-    $subscriptions = @(Get-AzureSubscription | where {$_.SubscriptionName -eq $AzureSubscriptionName -or $_.SubscriptionId -eq $AzureSubscriptionName})
-    if($subscriptions.Count -eq 1)
-    {
-        # Set working subscription
-        $targetSubscription = $subscriptions | select -First 1
-        $targetSubscription | Select-AzureSubscription
-
-        # Connect via Azure Resource Manager 
-        $resourceManagerContext = Add-AzureRmAccount -Credential $azureCredential -SubscriptionId $targetSubscription.SubscriptionId 
-
-        $currentSubscription = Get-AzureSubscription -Current
-        Write-Output "Working against subscription: $($currentSubscription.SubscriptionName) ($($currentSubscription.SubscriptionId))"
-    }
-    else
-    {
-        if($subscription.Count -eq 0)
-        {
-            throw "No accessible subscription found with name or ID [$AzureSubscriptionName]. Check the runbook parameters and ensure user is a co-administrator on the target subscription."
-        }
-        elseif($subscriptions.Count -gt 1)
-        {
-            throw "More than one accessible subscription found with name or ID [$AzureSubscriptionName]. Please ensure your subscription names are unique, or specify the ID instead"
-        }
-    }
+     
 
     # Get a list of all virtual machines in subscription
     $resourceManagerVMList = @(Get-AzureRmResource | where {$_.ResourceType -like "Microsoft.*/virtualMachines"} | sort Name)
