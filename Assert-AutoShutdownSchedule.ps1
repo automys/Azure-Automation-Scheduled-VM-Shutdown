@@ -55,7 +55,8 @@ param(
     [bool]$Simulate = $false
 )
 
-$VERSION = "2.0.2"
+$VERSION = '3.0.0'
+$autoShutdownTagName = 'AutoShutdownSchedule'
 
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
@@ -149,20 +150,19 @@ function AssertVirtualMachinePowerState
     param(
         [Object]$VirtualMachine,
         [string]$DesiredState,
-        [Object[]]$ResourceManagerVMList,
-        [Object[]]$ClassicVMList,
+        [Object[]]$VirtualMachineList,
         [bool]$Simulate
     )
 
     # Get VM depending on type
     if($VirtualMachine.ResourceType -eq "Microsoft.ClassicCompute/virtualMachines")
     {
-        $classicVM = $ClassicVMList | where Name -eq $VirtualMachine.Name
+        $classicVM = Get-AzureRmResource -ResourceId $VirtualMachine.ResourceId
         AssertClassicVirtualMachinePowerState -VirtualMachine $classicVM -DesiredState $DesiredState -Simulate $Simulate
     }
     elseif($VirtualMachine.ResourceType -eq "Microsoft.Compute/virtualMachines")
     {
-        $resourceManagerVM = $ResourceManagerVMList | where Name -eq $VirtualMachine.Name
+        $resourceManagerVM = $VirtualMachineList | where Name -eq $VirtualMachine.Name
         AssertResourceManagerVirtualMachinePowerState -VirtualMachine $resourceManagerVM -DesiredState $DesiredState -Simulate $Simulate
     }
     else
@@ -190,7 +190,7 @@ function AssertClassicVirtualMachinePowerState
         else
         {
             Write-Output "[$($VirtualMachine.Name)]: Starting VM"
-            $VirtualMachine | Start-AzureVM
+            Invoke-AzureRmResourceAction -ResourceId $VirtualMachine.ResourceId -Action 'start' -Force
         }
 	}
 		
@@ -204,7 +204,7 @@ function AssertClassicVirtualMachinePowerState
         else
         {
             Write-Output "[$($VirtualMachine.Name)]: Stopping VM"
-            $VirtualMachine | Stop-AzureVM -Force
+            Invoke-AzureRmResourceAction -ResourceId $VirtualMachine.ResourceId -Action 'shutdown' -Force
         }
 	}
 
@@ -318,31 +318,27 @@ try
         }
     }
 
-    # Connect to Azure using credential asset (classic API)
-    $account = Add-AzureAccount -Credential $azureCredential
-	
-    # Check for returned userID, indicating successful authentication
-    if(Get-AzureAccount -Name $azureCredential.UserName)
+    # Connect via Azure Resource Manager 
+    $resourceManagerContext = Add-AzureRmAccount -Credential $azureCredential -ErrorAction SilentlyContinue
+    if($resourceManagerContext)
     {
         Write-Output "Successfully authenticated as user: [$($azureCredential.UserName)]"
     }
     else
     {
-        throw "Authentication failed for credential [$($azureCredential.UserName)]. Ensure a valid Azure Active Directory user account is specified which is configured as a co-administrator (using classic portal) and subscription owner (modern portal) on the target subscription. Verify you can log into the Azure portal using these credentials."
+        throw "Authentication failed for credential [$($azureCredential.UserName)]. Ensure a valid Azure Active Directory user account is specified which is configured as a subscription owner (modern portal) on the target subscription. Verify you can log into the Azure portal using these credentials."
     }
 
+
     # Validate subscription
-    $subscriptions = @(Get-AzureSubscription | where {$_.SubscriptionName -eq $AzureSubscriptionName -or $_.SubscriptionId -eq $AzureSubscriptionName})
+    $subscriptions = @(Get-AzureRmSubscription | where {$_.SubscriptionName -eq $AzureSubscriptionName -or $_.SubscriptionId -eq $AzureSubscriptionName})
     if($subscriptions.Count -eq 1)
     {
         # Set working subscription
         $targetSubscription = $subscriptions | select -First 1
-        $targetSubscription | Select-AzureSubscription
+        Set-AzureRmContext -SubscriptionId $targetSubscription.SubscriptionId
 
-        # Connect via Azure Resource Manager 
-        $resourceManagerContext = Add-AzureRmAccount -Credential $azureCredential -SubscriptionId $targetSubscription.SubscriptionId 
-
-        $currentSubscription = Get-AzureSubscription -Current
+        $currentSubscription = (Get-AzureRmContext).Subscription
         Write-Output "Working against subscription: $($currentSubscription.SubscriptionName) ($($currentSubscription.SubscriptionId))"
     }
     else
@@ -356,13 +352,13 @@ try
             throw "More than one accessible subscription found with name or ID [$AzureSubscriptionName]. Please ensure your subscription names are unique, or specify the ID instead"
         }
     }
-
+    $vmList = @()
     # Get a list of all virtual machines in subscription
-    $resourceManagerVMList = @(Get-AzureRmResource | where {$_.ResourceType -like "Microsoft.*/virtualMachines"} | sort Name)
-    $classicVMList = Get-AzureVM
+    $vmList += @(Find-AzureRmResource -ResourceType 'Microsoft.Compute/virtualMachines' | sort Name)
+    $vmList += @(Find-AzureRmResource -ResourceType 'Microsoft.ClassicCompute/virtualMachines' | sort Name)
 
     # Get resource groups that are tagged for automatic shutdown of resources
-	$taggedResourceGroups = @(Get-AzureRmResourceGroup | where {$_.Tags.Count -gt 0 -and $_.Tags.Name -contains "AutoShutdownSchedule"})
+	$taggedResourceGroups = @(Get-AzureRmResourceGroup | where {$_.Tags.Count -gt 0 -and $_.Tags.Name -contains $autoShutdownTagName})
     $taggedResourceGroupNames = @($taggedResourceGroups | select -ExpandProperty ResourceGroupName)
     Write-Output "Found [$($taggedResourceGroups.Count)] schedule-tagged resource groups in subscription"	
 
@@ -370,23 +366,23 @@ try
     #  - Is it directly tagged for shutdown or member of a tagged resource group
     #  - Is the current time within the tagged schedule 
     # Then assert its correct power state based on the assigned schedule (if present)
-    Write-Output "Processing [$($resourceManagerVMList.Count)] virtual machines found in subscription"
-    foreach($vm in $resourceManagerVMList)
+    Write-Output "Processing [$($vmList.Count)] virtual machines found in subscription"
+    foreach($vm in $vmList)
     {
         $schedule = $null
 
         # Check for direct tag or group-inherited tag
-        if($vm.ResourceType -eq "Microsoft.Compute/virtualMachines" -and $vm.Tags -and $vm.Tags.Name -contains "AutoShutdownSchedule")
+        if($vm.ResourceType -eq "Microsoft.Compute/virtualMachines" -and $vm.Tags -and $vm.Tags.Name -contains $autoShutdownTagName)
         {
             # VM has direct tag (possible for resource manager deployment model VMs). Prefer this tag schedule.
-            $schedule = ($vm.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
+            $schedule = ($vm.Tags | where Name -eq $autoShutdownTagName)["Value"]
             Write-Output "[$($vm.Name)]: Found direct VM schedule tag with value: $schedule"
         }
         elseif($taggedResourceGroupNames -contains $vm.ResourceGroupName)
         {
             # VM belongs to a tagged resource group. Use the group tag
             $parentGroup = $taggedResourceGroups | where ResourceGroupName -eq $vm.ResourceGroupName
-            $schedule = ($parentGroup.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
+            $schedule = ($parentGroup.Tags | where Name -eq $autoShutdownTagName)["Value"]
             Write-Output "[$($vm.Name)]: Found parent resource group schedule tag with value: $schedule"
         }
         else
@@ -424,13 +420,13 @@ try
 		{
             # Schedule is matched. Shut down the VM if it is running. 
 		    Write-Output "[$($vm.Name)]: Current time [$currentTime] falls within the scheduled shutdown range [$matchedSchedule]"
-		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "StoppedDeallocated" -ResourceManagerVMList $resourceManagerVMList -ClassicVMList $classicVMList -Simulate $Simulate
+		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "StoppedDeallocated" -VirtualMachineList $vmList -Simulate $Simulate
 		}
 		else
 		{
             # Schedule not matched. Start VM if stopped.
 		    Write-Output "[$($vm.Name)]: Current time falls outside of all scheduled shutdown ranges."
-		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "Started" -ResourceManagerVMList $resourceManagerVMList -ClassicVMList $classicVMList -Simulate $Simulate
+		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "Started" -VirtualMachineList $vmList -Simulate $Simulate
 		}	    
     }
 
