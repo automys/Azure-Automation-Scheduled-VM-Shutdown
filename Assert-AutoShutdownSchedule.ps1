@@ -1,4 +1,4 @@
-﻿<#
+<#
     .SYNOPSIS
         This Azure Automation runbook automates the scheduled shutdown and startup of virtual machines in an Azure subscription. 
 
@@ -34,6 +34,11 @@
         If $true, the runbook will not perform any power actions and will only simulate evaluating the tagged schedules. Use this
         to test your runbook to see what it will do when run normally (Simulate = $false).
 
+    .PARAMETER Timezone
+        Defines the Timezone used when running the runbook. "GMT Standard Time" by default.
+        Microsoft Time Zone Index Values:
+        https://msdn.microsoft.com/en-us/library/ms912391(v=winembedded.11).aspx
+
     .EXAMPLE
         For testing examples, see the documentation at:
 
@@ -52,18 +57,25 @@ param(
     [parameter(Mandatory=$false)]
 	[String] $AzureSubscriptionName = "Use *Default Azure Subscription* Variable Value",
     [parameter(Mandatory=$false)]
-    [bool]$Simulate = $false
+    [bool] $Simulate = $false,
+    [parameter(Mandatory=$false)]
+    [String] $Timezone = "GMT Standard Time"    
 )
 
 $VERSION = "2.0.2"
+
+function GetCurrentDate
+{
+    return [system.timezoneinfo]::ConvertTime($(Get-Date),$([system.timezoneinfo]::GetSystemTimeZones() | ? id -eq $Timezone))
+}
 
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
 {	
 	# Initialize variables
 	$rangeStart, $rangeEnd, $parsedDay = $null
-	$currentTime = (Get-Date).ToUniversalTime()
-    $midnight = $currentTime.AddDays(1).Date	        
+	$currentTime = GetCurrentDate
+    	$midnight = $currentTime.AddDays(1).Date	        
 
 	try
 	{
@@ -267,7 +279,7 @@ function AssertResourceManagerVirtualMachinePowerState
 # Main runbook content
 try
 {
-    $currentTime = (Get-Date).ToUniversalTime()
+    $currentTime = GetCurrentDate
     Write-Output "Runbook started. Version: $VERSION"
     if($Simulate)
     {
@@ -277,7 +289,7 @@ try
     {
         Write-Output "*** Running in LIVE mode. Schedules will be enforced. ***"
     }
-    Write-Output "Current UTC/GMT time [$($currentTime.ToString("dddd, yyyy MMM dd HH:mm:ss"))] will be checked against schedules"
+    Write-Output "Current $Timezone [$($currentTime.ToString("dddd, yyyy MMM dd HH:mm:ss"))] will be checked against schedules"
 	
     # Retrieve subscription name from variable asset if not specified
     if($AzureSubscriptionName -eq "Use *Default Azure Subscription* Variable Value")
@@ -443,5 +455,5 @@ catch
 }
 finally
 {
-    Write-Output "Runbook finished (Duration: $(("{0:hh\:mm\:ss}" -f ((Get-Date).ToUniversalTime() - $currentTime))))"
+    Write-Output "Runbook finished (Duration: $(("{0:hh\:mm\:ss}" -f ((GetCurrentDate) - $currentTime))))"
 }
