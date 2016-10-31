@@ -16,6 +16,11 @@
         
         https://automys.com/library/asset/scheduled-virtual-machine-shutdown-startup-microsoft-azure
 
+    .PARAMETER AzureEnvironmentName
+        Use to select additional Azure clouds outside of Azure Commercial (e.g. Azure US Government).
+
+        By default, the runbook will use Azure Commercial
+
     .PARAMETER AzureCredentialName
         The name of the PowerShell credential asset in the Automation account that contains username and password
         for the account used to connect to target Azure subscription. This user must be configured as co-administrator and owner
@@ -48,6 +53,8 @@
 
 param(
     [parameter(Mandatory=$false)]
+	[String] $AzureEnvironmentName = "AzureCloud",
+    [parameter(Mandatory=$false)]
 	[String] $AzureCredentialName = "Use *Default Automation Credential* Asset",
     [parameter(Mandatory=$false)]
 	[String] $AzureSubscriptionName = "Use *Default Azure Subscription* Variable Value",
@@ -55,7 +62,7 @@ param(
     [bool]$Simulate = $false
 )
 
-$VERSION = "2.0.2"
+$VERSION = "2.0.3"
 
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
@@ -278,6 +285,20 @@ try
         Write-Output "*** Running in LIVE mode. Schedules will be enforced. ***"
     }
     Write-Output "Current UTC/GMT time [$($currentTime.ToString("dddd, yyyy MMM dd HH:mm:ss"))] will be checked against schedules"
+
+    # Retrieve subscription name from variable asset if not specified
+    if($AzureEnvironmentName -ne "AzureCloud")
+    {
+        $AzureEnvironmentName = Get-AutomationVariable -Name "Default Azure Environment"
+        if($AzureEnvironmentName.length -gt 0)
+        {
+            Write-Output "Specified environment name: [$AzureEnvironmentName]"
+        }
+        else
+        {
+            throw "No variable asset with name 'Default Azure Environment' was found. Either specify an Azure Environment name or define the default using a variable setting"
+        }
+    }
 	
     # Retrieve subscription name from variable asset if not specified
     if($AzureSubscriptionName -eq "Use *Default Azure Subscription* Variable Value")
@@ -319,7 +340,7 @@ try
     }
 
     # Connect to Azure using credential asset (classic API)
-    $account = Add-AzureAccount -Credential $azureCredential
+    $account = Add-AzureAccount -Environment $AzureEnvironmentName -Credential $azureCredential
 	
     # Check for returned userID, indicating successful authentication
     if(Get-AzureAccount -Name $azureCredential.UserName)
@@ -340,7 +361,7 @@ try
         $targetSubscription | Select-AzureSubscription
 
         # Connect via Azure Resource Manager 
-        $resourceManagerContext = Add-AzureRmAccount -Credential $azureCredential -SubscriptionId $targetSubscription.SubscriptionId 
+        $resourceManagerContext = Add-AzureRmAccount -EnvironmentName $AzureEnvironmentName -Credential $azureCredential -SubscriptionId $targetSubscription.SubscriptionId 
 
         $currentSubscription = Get-AzureSubscription -Current
         Write-Output "Working against subscription: $($currentSubscription.SubscriptionName) ($($currentSubscription.SubscriptionId))"
