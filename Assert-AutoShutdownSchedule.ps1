@@ -57,12 +57,14 @@ param(
 
 $VERSION = "2.0.2"
 
+$VERSION = "2.0.2"
+
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
 {	
 	# Initialize variables
 	$rangeStart, $rangeEnd, $parsedDay = $null
-	$currentTime = (Get-Date).ToUniversalTime()
+	$currentTime = (Get-Date).ToUniversalTime().AddHours(5).AddMinutes(30)
     $midnight = $currentTime.AddDays(1).Date	        
 
 	try
@@ -73,10 +75,13 @@ function CheckScheduleEntry ([string]$TimeRange)
 	        $timeRangeComponents = $TimeRange -split "->" | foreach {$_.Trim()}
 	        if($timeRangeComponents.Count -eq 2)
 	        {
-	            $rangeStart = Get-Date $timeRangeComponents[0]
+                $rangeStart = Get-Date $timeRangeComponents[0]
 	            $rangeEnd = Get-Date $timeRangeComponents[1]
-	
-	            # Check for crossing midnight
+	            Write-Output $rangeStart
+	            Write-Output $rangeEnd
+                Write-Output $currentTime
+
+                # Check for crossing midnight
 	            if($rangeStart -gt $rangeEnd)
 	            {
                     # If current time is between the start of range and midnight tonight, interpret start time as earlier today and end time as tomorrow
@@ -277,7 +282,7 @@ try
     {
         Write-Output "*** Running in LIVE mode. Schedules will be enforced. ***"
     }
-    Write-Output "Current UTC/GMT time [$($currentTime.ToString("dddd, yyyy MMM dd HH:mm:ss"))] will be checked against schedules"
+    Write-Output "Current IST time [$($currentTime.ToString("dddd, yyyy MMM dd HH:mm:ss"))] will be checked against schedules"
 	
     # Retrieve subscription name from variable asset if not specified
     if($AzureSubscriptionName -eq "Use *Default Azure Subscription* Variable Value")
@@ -362,7 +367,7 @@ try
     $classicVMList = Get-AzureVM
 
     # Get resource groups that are tagged for automatic shutdown of resources
-	$taggedResourceGroups = @(Get-AzureRmResourceGroup | where {$_.Tags.Count -gt 0 -and $_.Tags.Name -contains "AutoShutdownSchedule"})
+	$taggedResourceGroups = @(Get-AzureRmResourceGroup | where {$_.Tags.Count -gt 0 -and $_.Tags.Keys -contains "AutoShutdownSchedule"})
     $taggedResourceGroupNames = @($taggedResourceGroups | select -ExpandProperty ResourceGroupName)
     Write-Output "Found [$($taggedResourceGroups.Count)] schedule-tagged resource groups in subscription"	
 
@@ -376,17 +381,17 @@ try
         $schedule = $null
 
         # Check for direct tag or group-inherited tag
-        if($vm.ResourceType -eq "Microsoft.Compute/virtualMachines" -and $vm.Tags -and $vm.Tags.Name -contains "AutoShutdownSchedule")
+        if($vm.ResourceType -eq "Microsoft.Compute/virtualMachines" -and $vm.Tags -and $vm.Tags.Keys -contains "AutoShutdownSchedule")
         {
             # VM has direct tag (possible for resource manager deployment model VMs). Prefer this tag schedule.
-            $schedule = ($vm.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
+            $schedule = ($vm.Tags | where Keys -eq "AutoShutdownSchedule").Values
             Write-Output "[$($vm.Name)]: Found direct VM schedule tag with value: $schedule"
         }
         elseif($taggedResourceGroupNames -contains $vm.ResourceGroupName)
         {
             # VM belongs to a tagged resource group. Use the group tag
             $parentGroup = $taggedResourceGroups | where ResourceGroupName -eq $vm.ResourceGroupName
-            $schedule = ($parentGroup.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
+            $schedule = ($parentGroup.Tags | where Name -eq "AutoShutdownSchedule").Values
             Write-Output "[$($vm.Name)]: Found parent resource group schedule tag with value: $schedule"
         }
         else
