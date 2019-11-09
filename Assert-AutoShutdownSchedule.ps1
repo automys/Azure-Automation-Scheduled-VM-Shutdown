@@ -1,6 +1,6 @@
-﻿<#
+<#
     .SYNOPSIS
-        This Azure Automation runbook automates the scheduled shutdown and startup of virtual machines in an Azure subscription. 
+        This Azure Automation runbook automates the scheduled shutdown and startup of resource manager virtual machines in an Azure subscription. 
 
     .DESCRIPTION
         The runbook implements a solution for scheduled power management of Azure virtual machines in combination with tags
@@ -10,26 +10,33 @@
         are shut down or started to conform to the defined schedule.
 
         This is a PowerShell runbook, as opposed to a PowerShell Workflow runbook.
-
-        This runbook requires the "Azure" and "AzureRM.Resources" modules which are present by default in Azure Automation accounts.
-        For detailed documentation and instructions, see: 
         
+        For detailed documentation and instructions, see: 
         https://automys.com/library/asset/scheduled-virtual-machine-shutdown-startup-microsoft-azure
 
-    .PARAMETER AzureCredentialName
-        The name of the PowerShell credential asset in the Automation account that contains username and password
-        for the account used to connect to target Azure subscription. This user must be configured as co-administrator and owner
-        of the subscription for best functionality. 
+        This version of runbook requires the new "Az.Accounts", "Az.Automation", "Az.Compute", "Az.Resources" modules to be added to
+        Azure Automation account: https://docs.microsoft.com/en-us/azure/automation/az-modules
+        The runbook authenticates to Azure as a Service Principal: https://docs.microsoft.com/en-us/cli/azure/create-an-azure-service-principal-azure-cli See "AsureConnectionName" parameter description.
+        The runbook starts/stops VMs in parallel, using -AsJob switch: https://docs.microsoft.com/en-us/powershell/azure/using-psjobs
+	The runbook supports only resource manager virtual machines, support of classic VMs is deprecated in this version.
 
-        By default, the runbook will use the credential with name "Default Automation Credential"
-
-        For for details on credential configuration, see:
-        http://azure.microsoft.com/blog/2014/08/27/azure-automation-authenticating-to-azure-using-azure-active-directory/
-    
     .PARAMETER AzureSubscriptionName
         The name or ID of Azure subscription in which the resources will be created. By default, the runbook will use 
         the value defined in the Variable setting named "Default Azure Subscription"
-    
+
+    .PARAMETER AzureConnectionName
+        The name of the Automation connection asset with type of "AzureServicePrincipal" that contains the information required to connect to resources
+        in target Azure subscription as a Service Principal defined in "Azure Run As Account".
+        https://docs.microsoft.com/en-us/azure/automation/automation-connections
+        Azure Run As Account can be created in different ways:
+        https://docs.microsoft.com/en-us/azure/automation/automation-quickstart-create-account
+        https://docs.microsoft.com/en-us/azure/automation/manage-runas-account#create-a-run-as-account-in-the-portal
+        
+        By default, the runbook will use the value defined in the Variable setting named "Default AzureRunAsConnection".
+        Check if connection with name "AzureRunAsConnection" with type "AzureServicePrincipal" already exists in Automation Account in Shared Resources\Connections
+        If no, create "Azure Run As Account" as described in https://docs.microsoft.com/en-us/azure/automation/manage-runas-account#create-a-run-as-account-in-the-portal 
+        Connection "AzureRunAsConnection" should have been created automatically during creation "Azure Run As Account".
+
     .PARAMETER Simulate
         If $true, the runbook will not perform any power actions and will only simulate evaluating the tagged schedules. Use this
         to test your runbook to see what it will do when run normally (Simulate = $false).
@@ -48,14 +55,14 @@
 
 param(
     [parameter(Mandatory=$false)]
-	[String] $AzureCredentialName = "Use *Default Automation Credential* Asset",
-    [parameter(Mandatory=$false)]
 	[String] $AzureSubscriptionName = "Use *Default Azure Subscription* Variable Value",
+    [parameter(Mandatory=$false)]
+    [String] $AzureConnectionName = "Use *Default AzureRunAsConnection* Variable Value",
     [parameter(Mandatory=$false)]
     [bool]$Simulate = $false
 )
 
-$VERSION = "2.0.2"
+$VERSION = "2.0.3"
 
 # Define function to check current time against specified range
 function CheckScheduleEntry ([string]$TimeRange)
@@ -143,78 +150,6 @@ function CheckScheduleEntry ([string]$TimeRange)
 	
 } # End function CheckScheduleEntry
 
-# Function to handle power state assertion for both classic and resource manager VMs
-function AssertVirtualMachinePowerState
-{
-    param(
-        [Object]$VirtualMachine,
-        [string]$DesiredState,
-        [Object[]]$ResourceManagerVMList,
-        [Object[]]$ClassicVMList,
-        [bool]$Simulate
-    )
-
-    # Get VM depending on type
-    if($VirtualMachine.ResourceType -eq "Microsoft.ClassicCompute/virtualMachines")
-    {
-        $classicVM = $ClassicVMList | where Name -eq $VirtualMachine.Name
-        AssertClassicVirtualMachinePowerState -VirtualMachine $classicVM -DesiredState $DesiredState -Simulate $Simulate
-    }
-    elseif($VirtualMachine.ResourceType -eq "Microsoft.Compute/virtualMachines")
-    {
-        $resourceManagerVM = $ResourceManagerVMList | where Name -eq $VirtualMachine.Name
-        AssertResourceManagerVirtualMachinePowerState -VirtualMachine $resourceManagerVM -DesiredState $DesiredState -Simulate $Simulate
-    }
-    else
-    {
-        Write-Output "VM type not recognized: [$($VirtualMachine.ResourceType)]. Skipping."
-    }
-}
-
-# Function to handle power state assertion for classic VM
-function AssertClassicVirtualMachinePowerState
-{
-    param(
-        [Object]$VirtualMachine,
-        [string]$DesiredState,
-        [bool]$Simulate
-    )
-
-    # If should be started and isn't, start VM
-	if($DesiredState -eq "Started" -and $VirtualMachine.PowerState -notmatch "Started|Starting")
-	{
-		if($Simulate)
-        {
-            Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have started VM. (No action taken)"
-        }
-        else
-        {
-            Write-Output "[$($VirtualMachine.Name)]: Starting VM"
-            $VirtualMachine | Start-AzureVM
-        }
-	}
-		
-	# If should be stopped and isn't, stop VM
-	elseif($DesiredState -eq "StoppedDeallocated" -and $VirtualMachine.PowerState -ne "Stopped")
-	{
-        if($Simulate)
-        {
-            Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have stopped VM. (No action taken)"
-        }
-        else
-        {
-            Write-Output "[$($VirtualMachine.Name)]: Stopping VM"
-            $VirtualMachine | Stop-AzureVM -Force
-        }
-	}
-
-    # Otherwise, current power state is correct
-    else
-    {
-        Write-Output "[$($VirtualMachine.Name)]: Current power state [$($VirtualMachine.PowerState)] is correct."
-    }
-}
-
 # Function to handle power state assertion for resource manager VM
 function AssertResourceManagerVirtualMachinePowerState
 {
@@ -223,46 +158,52 @@ function AssertResourceManagerVirtualMachinePowerState
         [string]$DesiredState,
         [bool]$Simulate
     )
+    if($VirtualMachine.ResourceType -eq "Microsoft.Compute/virtualMachines")
+    {
+        # Get VM with current status
+        $resourceManagerVM = Get-AzVM -ResourceGroupName $VirtualMachine.ResourceGroupName -Name $VirtualMachine.Name -Status
+        $currentStatus = $resourceManagerVM.Statuses | where Code -like "PowerState*" 
+        $currentStatus = $currentStatus.Code -replace "PowerState/",""
 
-    # Get VM with current status
-    $resourceManagerVM = Get-AzureRmVM -ResourceGroupName $VirtualMachine.ResourceGroupName -Name $VirtualMachine.Name -Status
-    $currentStatus = $resourceManagerVM.Statuses | where Code -like "PowerState*" 
-    $currentStatus = $currentStatus.Code -replace "PowerState/",""
-
-    # If should be started and isn't, start VM
-	if($DesiredState -eq "Started" -and $currentStatus -notmatch "running")
-	{
-        if($Simulate)
-        {
-            Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have started VM. (No action taken)"
-        }
-        else
-        {
-            Write-Output "[$($VirtualMachine.Name)]: Starting VM"
-            $resourceManagerVM | Start-AzureRmVM
-        }
-	}
+        # If should be started and isn't, start VM
+    	if($DesiredState -eq "Started" -and $currentStatus -notmatch "running")
+    	{
+            if($Simulate)
+            {
+                Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have started VM. (No action taken)"
+            }
+            else
+            {
+                Write-Output "[$($VirtualMachine.Name)]: Starting VM"
+                $resourceManagerVM | Start-AzVM -AsJob
+            }
+    	}
 		
-	# If should be stopped and isn't, stop VM
-	elseif($DesiredState -eq "StoppedDeallocated" -and $currentStatus -ne "deallocated")
-	{
-        if($Simulate)
-        {
-            Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have stopped VM. (No action taken)"
-        }
+	    # If should be stopped and isn't, stop VM
+	    elseif($DesiredState -eq "StoppedDeallocated" -and $currentStatus -ne "deallocated")
+    	{
+            if($Simulate)
+            {
+                Write-Output "[$($VirtualMachine.Name)]: SIMULATION -- Would have stopped VM. (No action taken)"
+            }
+            else
+            {
+                Write-Output "[$($VirtualMachine.Name)]: Stopping VM"
+                $resourceManagerVM | Stop-AzVM -Force -AsJob
+            }
+    	}
+
+        # Otherwise, current power state is correct
         else
         {
-            Write-Output "[$($VirtualMachine.Name)]: Stopping VM"
-            $resourceManagerVM | Stop-AzureRmVM -Force
+            Write-Output "[$($VirtualMachine.Name)]: Current power state [$currentStatus] is correct."
         }
-	}
-
-    # Otherwise, current power state is correct
+    }
     else
     {
-        Write-Output "[$($VirtualMachine.Name)]: Current power state [$currentStatus] is correct."
+        Write-Output "Runbook supports only Resource Manager VMs. VM type [$($VirtualMachine.ResourceType)] not supported. Skipping."
     }
-}
+} # End of function AssertResourceManagerVirtualMachinePowerState
 
 # Main runbook content
 try
@@ -293,57 +234,67 @@ try
         }
     }
 
-    # Retrieve credential
-    write-output "Specified credential asset name: [$AzureCredentialName]"
-    if($AzureCredentialName -eq "Use *Default Automation Credential* asset")
+    # Connect to Azure as a Service Principal
+    # Retrieve Azure connection name from variable asset if not specified
+    if($AzureConnectionName -eq "Use *Default AzureRunAsConnection* Variable Value")
     {
-        # By default, look for "Default Automation Credential" asset
-        $azureCredential = Get-AutomationPSCredential -Name "Default Automation Credential"
-        if($azureCredential -ne $null)
+        # By default, look for "Default AzureRunAsConnection" asset in Automation Account\Shared Resources\Variables
+        $AzureConnectionName = Get-AutomationVariable -Name "Default AzureRunAsConnection"
+        if($AzureConnectionName.length -gt 0)
         {
-		    Write-Output "Attempting to authenticate as: [$($azureCredential.UserName)]"
+            Write-Output "Specified Azure connection name: [$AzureConnectionName]"
         }
         else
         {
-            throw "No automation credential name was specified, and no credential asset with name 'Default Automation Credential' was found. Either specify a stored credential name or define the default using a credential asset"
+            throw "No Azure connection name was specified, and no variable asset with name 'Default AzureRunAsConnection' was found in Automation Account\Shared Resources\Variables. Either specify an Azure connection name or define the default using a variable setting"
         }
+    }
+    elseif ($AzureConnectionName.length -gt 0)
+    {
+        Write-Output "Specified Azure connection name: [$AzureConnectionName]"
     }
     else
     {
-        # A different credential name was specified, attempt to load it
-        $azureCredential = Get-AutomationPSCredential -Name $AzureCredentialName
-        if($azureCredential -eq $null)
+        throw "No Azure connection name was specified, and no variable asset with name 'Default AzureRunAsConnection' was found in Automation Account\Shared Resources\Variables. Either specify an Azure connection name or define the default using a variable setting"
+    }
+
+    # Get connection from Automation Account\Shared Resources\Connections asset
+    $servicePrincipalConnection = Get-AutomationConnection -Name $AzureConnectionName
+    if (!$servicePrincipalConnection)
+    {
+        throw "Failed to get connection with name [$AzureConnectionName] from Automation Account\Shared Resources\Connections asset"
+    }
+    
+    # Check if received connection is of type "AzureadServicePrincipal"
+    elseif ($servicePrincipalConnection.ContainsKey("CertificateThumbprint"))
+    {
+        Write-Output "Attempting to authenticate as Service Principal with Application ID: [$($servicePrincipalConnection.ApplicationID)]..."
+        $connectionResult =  Connect-AzAccount -Tenant $servicePrincipalConnection.TenantID `
+                             -ApplicationId $servicePrincipalConnection.ApplicationID `
+                             -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint `
+                             -ServicePrincipal
+        if ($connectionResult)
         {
-            throw "Failed to get credential with name [$AzureCredentialName]"
+            $servicePrincipal = Get-AzADServicePrincipal -ApplicationId $servicePrincipalConnection.ApplicationID
+            Write-Output "Successfully authenticated as Service Principal [$($servicePrincipal.ID)] associated with Application [$($servicePrincipal.DisplayName)], Application ID: [$($servicePrincipal.ApplicationID)]"
         }
-    }
-
-    # Connect to Azure using credential asset (classic API)
-    $account = Add-AzureAccount -Credential $azureCredential
-	
-    # Check for returned userID, indicating successful authentication
-    if(Get-AzureAccount -Name $azureCredential.UserName)
-    {
-        Write-Output "Successfully authenticated as user: [$($azureCredential.UserName)]"
+        else
+        {
+            throw "Connect-AzAccount error. See error description for details."
+        }
     }
     else
     {
-        throw "Authentication failed for credential [$($azureCredential.UserName)]. Ensure a valid Azure Active Directory user account is specified which is configured as a co-administrator (using classic portal) and subscription owner (modern portal) on the target subscription. Verify you can log into the Azure portal using these credentials."
+        throw "The type of specified Azure connection is either `"AzureClassicCertificate`" or `"Azure`". Please specify connection with type `"AzureServicePrincipal`"."
     }
-
+    
     # Validate subscription
-    $subscriptions = @(Get-AzureSubscription | where {$_.SubscriptionName -eq $AzureSubscriptionName -or $_.SubscriptionId -eq $AzureSubscriptionName})
+    $subscriptions = @(Get-AzSubscription | where {$_.Name -eq $AzureSubscriptionName -or $_.SubscriptionId -eq $AzureSubscriptionName})
     if($subscriptions.Count -eq 1)
     {
         # Set working subscription
-        $targetSubscription = $subscriptions | select -First 1
-        $targetSubscription | Select-AzureSubscription
-
-        # Connect via Azure Resource Manager 
-        $resourceManagerContext = Add-AzureRmAccount -Credential $azureCredential -SubscriptionId $targetSubscription.SubscriptionId 
-
-        $currentSubscription = Get-AzureSubscription -Current
-        Write-Output "Working against subscription: $($currentSubscription.SubscriptionName) ($($currentSubscription.SubscriptionId))"
+        $currentSubscription = Get-AzContext
+        Write-Output "Working against subscription: $($currentSubscription.Subscription.Name) ($($currentSubscription.Subscription.Id))"
     }
     else
     {
@@ -358,11 +309,10 @@ try
     }
 
     # Get a list of all virtual machines in subscription
-    $resourceManagerVMList = @(Get-AzureRmResource | where {$_.ResourceType -like "Microsoft.*/virtualMachines"} | sort Name)
-    $classicVMList = Get-AzureVM
-
+    $resourceManagerVMList = @(Get-AzResource | where {$_.ResourceType -like "Microsoft.*/virtualMachines"} | sort Name)
+     
     # Get resource groups that are tagged for automatic shutdown of resources
-	$taggedResourceGroups = @(Get-AzureRmResourceGroup | where {$_.Tags.Count -gt 0 -and $_.Tags.Name -contains "AutoShutdownSchedule"})
+	$taggedResourceGroups = @(Get-AzResourceGroup | where {$_.Tags.Count -gt 0 -and $_.Tags.Keys -contains "AutoShutdownSchedule"})
     $taggedResourceGroupNames = @($taggedResourceGroups | select -ExpandProperty ResourceGroupName)
     Write-Output "Found [$($taggedResourceGroups.Count)] schedule-tagged resource groups in subscription"	
 
@@ -376,17 +326,17 @@ try
         $schedule = $null
 
         # Check for direct tag or group-inherited tag
-        if($vm.ResourceType -eq "Microsoft.Compute/virtualMachines" -and $vm.Tags -and $vm.Tags.Name -contains "AutoShutdownSchedule")
+        if($vm.ResourceType -eq "Microsoft.Compute/virtualMachines" -and $vm.Tags -and $vm.Tags.Keys -contains "AutoShutdownSchedule")
         {
             # VM has direct tag (possible for resource manager deployment model VMs). Prefer this tag schedule.
-            $schedule = ($vm.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
+            $schedule = ($vm.Tags | where Keys -eq "AutoShutdownSchedule")['AutoShutdownSchedule']
             Write-Output "[$($vm.Name)]: Found direct VM schedule tag with value: $schedule"
         }
         elseif($taggedResourceGroupNames -contains $vm.ResourceGroupName)
         {
             # VM belongs to a tagged resource group. Use the group tag
             $parentGroup = $taggedResourceGroups | where ResourceGroupName -eq $vm.ResourceGroupName
-            $schedule = ($parentGroup.Tags | where Name -eq "AutoShutdownSchedule")["Value"]
+            $schedule = ($parentGroup.Tags | where Keys -eq "AutoShutdownSchedule")['AutoShutdownSchedule']
             Write-Output "[$($vm.Name)]: Found parent resource group schedule tag with value: $schedule"
         }
         else
@@ -424,16 +374,15 @@ try
 		{
             # Schedule is matched. Shut down the VM if it is running. 
 		    Write-Output "[$($vm.Name)]: Current time [$currentTime] falls within the scheduled shutdown range [$matchedSchedule]"
-		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "StoppedDeallocated" -ResourceManagerVMList $resourceManagerVMList -ClassicVMList $classicVMList -Simulate $Simulate
+            AssertResourceManagerVirtualMachinePowerState -VirtualMachine $vm -DesiredState "StoppedDeallocated" -Simulate $Simulate
 		}
 		else
 		{
             # Schedule not matched. Start VM if stopped.
 		    Write-Output "[$($vm.Name)]: Current time falls outside of all scheduled shutdown ranges."
-		    AssertVirtualMachinePowerState -VirtualMachine $vm -DesiredState "Started" -ResourceManagerVMList $resourceManagerVMList -ClassicVMList $classicVMList -Simulate $Simulate
+            AssertResourceManagerVirtualMachinePowerState -VirtualMachine $vm -DesiredState "Started" -Simulate $Simulate
 		}	    
     }
-
     Write-Output "Finished processing virtual machine schedules"
 }
 catch
